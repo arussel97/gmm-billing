@@ -1,6 +1,6 @@
 /* ══════════════════════════════════════════════════════
    GMM Billing Solutions — Assessment Portal
-   app.js  |  All application logic
+   app.js  |  v3 — Session persist + Anti-cheat + Excel export
    ══════════════════════════════════════════════════════ */
 
 // ════════════════════════════════
@@ -8,33 +8,44 @@
 // ════════════════════════════════
 const TEAMS_DEFAULT = ['Charges Team','Payment Team','Analyst Team','Coding Team','AR Team','Management','Operations'];
 
-// Google Apps Script Web App URL — set via Settings tab or edit here directly
-let GAS_URL = localStorage.getItem('gmm_gas_url') || '';
-
+let GAS_URL     = localStorage.getItem('gmm_gas_url') || '';
 let currentUser = null;
-let assessments  = [];
-let currentAID   = null;
-let empAnswers   = {};
-let lockedQs     = {};
-let allResults   = [];
+let assessments = [];
+let currentAID  = null;
+let empAnswers  = {};
+let lockedQs    = {};
+let allResults  = [];
+let quizLocked  = false;   // true while employee is taking an assessment
 
 // ════════════════════════════════
-// INIT
+// INIT — restore session on refresh
 // ════════════════════════════════
 (function init(){
   try { assessments = JSON.parse(localStorage.getItem('gmm_assessments') || '[]'); } catch(e){ assessments = []; }
 
-  // Restore GAS URL in settings input if available
+  // ── RESTORE SESSION after page refresh ──────────────────
+  const saved = localStorage.getItem('gmm_session');
+  if(saved) {
+    try {
+      currentUser = JSON.parse(saved);
+      afterLogin();   // go straight back to correct page
+      return;         // skip login screen setup
+    } catch(e) {
+      localStorage.removeItem('gmm_session');
+    }
+  }
+
+  // Restore GAS URL input
   const gasInp = document.getElementById('gas-inp');
   if(gasInp && GAS_URL) gasInp.value = GAS_URL;
 
-  // Enter key on login fields
+  // Enter key on login
   ['li-email','li-pass'].forEach(id => {
     const el = document.getElementById(id);
     if(el) el.addEventListener('keydown', e => { if(e.key === 'Enter') doLogin(); });
   });
 
-  // Explanation textarea toggle in builder
+  // Explanation toggle in builder
   document.addEventListener('change', e => {
     if(e.target.id === 'f-exp') document.getElementById('s-exp').classList.toggle('hidden', !e.target.checked);
   });
@@ -44,9 +55,139 @@ let allResults   = [];
     ov.addEventListener('click', e => { if(e.target === ov) ov.classList.remove('open'); });
   });
 
-  // Seed demo assessments if none exist
   seedDemoAssessments();
 })();
+
+// ════════════════════════════════
+// ANTI-CHEAT — Tab/Window/Focus Lock
+// Blocks switching away during assessment
+// ════════════════════════════════
+let warnCount = 0;
+const MAX_WARNS = 3;
+
+function enableAssessmentLock() {
+  quizLocked = true;
+  warnCount  = 0;
+
+  // Block visibility change (tab switch, minimise)
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+
+  // Block window blur (switching apps / dual monitor click-away)
+  window.addEventListener('blur', handleWindowBlur);
+
+  // Block right-click
+  document.addEventListener('contextmenu', blockEvent);
+
+  // Block common keyboard shortcuts: F12, Ctrl+Shift+I, Ctrl+Tab, Alt+Tab, PrintScreen
+  document.addEventListener('keydown', blockShortcuts);
+
+  // Warn if they try to close/refresh
+  window.addEventListener('beforeunload', handleBeforeUnload);
+}
+
+function disableAssessmentLock() {
+  quizLocked = false;
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
+  window.removeEventListener('blur', handleWindowBlur);
+  document.removeEventListener('contextmenu', blockEvent);
+  document.removeEventListener('keydown', blockShortcuts);
+  window.removeEventListener('beforeunload', handleBeforeUnload);
+}
+
+function handleVisibilityChange() {
+  if(!quizLocked) return;
+  if(document.hidden) {
+    warnCount++;
+    showAntiCheatWarning('⚠ You switched away from the assessment!');
+  }
+}
+
+function handleWindowBlur() {
+  if(!quizLocked) return;
+  warnCount++;
+  showAntiCheatWarning('⚠ You clicked outside the assessment window!');
+}
+
+function blockEvent(e) {
+  if(!quizLocked) return;
+  e.preventDefault();
+  e.stopPropagation();
+  return false;
+}
+
+function blockShortcuts(e) {
+  if(!quizLocked) return;
+  const blocked =
+    e.key === 'F12' ||
+    (e.ctrlKey && e.shiftKey && ['I','J','C','U'].includes(e.key.toUpperCase())) ||
+    (e.ctrlKey && e.key.toUpperCase() === 'U') ||
+    (e.altKey  && e.key === 'Tab') ||
+    e.key === 'PrintScreen';
+  if(blocked) { e.preventDefault(); e.stopPropagation(); return false; }
+}
+
+function handleBeforeUnload(e) {
+  if(!quizLocked) return;
+  e.preventDefault();
+  e.returnValue = 'You are in the middle of an assessment. Are you sure you want to leave?';
+  return e.returnValue;
+}
+
+function showAntiCheatWarning(msg) {
+  // Remove existing overlay if any
+  const old = document.getElementById('ac-overlay');
+  if(old) old.remove();
+
+  const remaining = MAX_WARNS - warnCount;
+  const overlay   = document.createElement('div');
+  overlay.id = 'ac-overlay';
+  overlay.style.cssText = `
+    position:fixed;inset:0;background:rgba(6,13,26,0.97);z-index:9999;
+    display:flex;align-items:center;justify-content:center;flex-direction:column;
+    text-align:center;padding:30px;animation:riseIn .3s ease;
+  `;
+
+  if(warnCount >= MAX_WARNS) {
+    // Auto-submit or force logout after too many violations
+    overlay.innerHTML = `
+      <div style="font-size:56px;margin-bottom:20px;">🚫</div>
+      <div style="font-family:'Playfair Display',serif;font-size:28px;color:#ff4d4d;margin-bottom:12px;">Assessment Terminated</div>
+      <div style="font-size:15px;color:#8899bb;max-width:440px;line-height:1.7;margin-bottom:28px;">
+        You switched away from the assessment ${MAX_WARNS} times. Your session has been ended and this incident will be flagged.
+      </div>
+      <button onclick="forceEndAssessment()" style="background:linear-gradient(135deg,#ff4d4d,#ff8080);border:none;border-radius:11px;padding:13px 36px;color:#fff;font-family:'Outfit',sans-serif;font-size:15px;font-weight:700;cursor:pointer;">
+        Exit Assessment
+      </button>`;
+  } else {
+    overlay.innerHTML = `
+      <div style="font-size:56px;margin-bottom:20px;">⚠️</div>
+      <div style="font-family:'Playfair Display',serif;font-size:26px;color:#f5c842;margin-bottom:12px;">Warning ${warnCount} of ${MAX_WARNS}</div>
+      <div style="font-size:15px;color:#8899bb;max-width:440px;line-height:1.7;margin-bottom:8px;">${msg}</div>
+      <div style="font-size:13px;color:#ff8080;margin-bottom:28px;">
+        ${remaining} warning${remaining !== 1 ? 's' : ''} remaining before your assessment is terminated.
+      </div>
+      <button onclick="dismissAntiCheatWarning()" style="background:linear-gradient(135deg,#1a6fff,#4d8fff);border:none;border-radius:11px;padding:13px 36px;color:#fff;font-family:'Outfit',sans-serif;font-size:15px;font-weight:700;cursor:pointer;">
+        Return to Assessment
+      </button>`;
+  }
+
+  document.body.appendChild(overlay);
+  // Force focus back to window
+  window.focus();
+}
+
+function dismissAntiCheatWarning() {
+  const el = document.getElementById('ac-overlay');
+  if(el) el.remove();
+  window.focus();
+}
+
+function forceEndAssessment() {
+  disableAssessmentLock();
+  const el = document.getElementById('ac-overlay');
+  if(el) el.remove();
+  doLogout();
+}
 
 // ════════════════════════════════
 // GOOGLE APPS SCRIPT API BRIDGE
@@ -76,20 +217,18 @@ function gasCall(data) {
 
     window[cbName] = (result) => { cleanup(); resolve(result); };
 
-    const script = document.createElement('script');
-    script.id  = cbName;
-    script.src = url;
+    const script   = document.createElement('script');
+    script.id      = cbName;
+    script.src     = url;
     script.onerror = () => { cleanup(); reject(new Error('Script load failed — check your Apps Script URL')); };
     document.head.appendChild(script);
   });
 }
 
-async function gasCallSafe(data) {
-  return gasCall(data);
-}
+async function gasCallSafe(data) { return gasCall(data); }
 
 // ════════════════════════════════
-// GAS SETTINGS (Settings tab)
+// GAS SETTINGS
 // ════════════════════════════════
 function saveGAS() {
   const v = document.getElementById('gas-inp').value.trim();
@@ -107,11 +246,13 @@ async function testGAS() {
   const btn = document.getElementById('test-gas-btn');
   btn.textContent = 'Testing…'; btn.disabled = true;
   try {
-    const r = await fetch(v, { method:'POST', headers:{'Content-Type':'text/plain'}, body: JSON.stringify({action:'ping'}), redirect:'follow' });
-    const txt = await r.text();
-    const d = JSON.parse(txt.replace(/^[\w]+\(/,'').replace(/\);\s*$/,'').trim());
-    if(d && d.success){ toast('✅ Connected to Google Sheets!','ok'); document.getElementById('gas-status').textContent = '✓ Connection successful'; }
-    else { toast('⚠ Script responded: '+(d.message||'Unknown'),'err'); }
+    const r = await gasCall({ action: 'ping' });
+    if(r && r.success){
+      toast('✅ Connected to Google Sheets!','ok');
+      document.getElementById('gas-status').textContent = '✓ Connection successful';
+    } else {
+      toast('⚠ Script responded: '+(r.message||'Unknown'),'err');
+    }
   } catch(e) {
     toast('❌ Failed: '+e.message,'err');
     document.getElementById('gas-status').textContent = '✗ ' + e.message;
@@ -146,15 +287,9 @@ async function doLogin() {
   if(GAS_URL) {
     try {
       const r = await gasCallSafe({ action: 'login', email, password: pass });
-      if(r && r.success) {
-        user = r.user;
-      } else {
-        resetBtn();
-        showErr(r && r.message ? r.message : 'Invalid email or password.');
-        return;
-      }
+      if(r && r.success) { user = r.user; }
+      else { resetBtn(); showErr(r && r.message ? r.message : 'Invalid email or password.'); return; }
     } catch(e) {
-      // GAS unreachable — fall back to demo credentials
       user = demoLogin(email, pass);
     }
   } else {
@@ -162,14 +297,14 @@ async function doLogin() {
   }
 
   resetBtn();
-
-  if(!user) {
-    showErr('Invalid email or password. Please try again.');
-    return;
-  }
+  if(!user){ showErr('Invalid email or password. Please try again.'); return; }
 
   hideErr();
   currentUser = user;
+
+  // ── SAVE SESSION so page refresh restores the correct view ──
+  localStorage.setItem('gmm_session', JSON.stringify(user));
+
   afterLogin();
 }
 
@@ -185,13 +320,15 @@ function demoLogin(email, pass) {
 
 function afterLogin() {
   document.getElementById('pg-login').style.display = 'none';
+
+  // Make sure login inputs are in the DOM before trying
+  const gasInp = document.getElementById('gas-inp');
+  if(gasInp && GAS_URL) gasInp.value = GAS_URL;
+
   if(currentUser.role === 'admin') {
     document.getElementById('pg-admin').classList.add('active');
     document.getElementById('adm-nm').textContent = currentUser.name;
     document.getElementById('adm-av').textContent = currentUser.name[0].toUpperCase();
-    // Restore GAS URL in settings
-    const gasInp = document.getElementById('gas-inp');
-    if(gasInp && GAS_URL) gasInp.value = GAS_URL;
     const dp = localStorage.getItem('gmm_def_pass');
     const de = localStorage.getItem('gmm_def_email');
     if(dp) document.getElementById('def-pass').value = dp;
@@ -208,12 +345,19 @@ function afterLogin() {
 }
 
 function doLogout() {
-  currentUser = null; empAnswers = {}; lockedQs = {};
+  // Remove assessment lock before logging out
+  disableAssessmentLock();
+
+  // Clear session
+  localStorage.removeItem('gmm_session');
+
+  currentUser = null; empAnswers = {}; lockedQs = {}; quizLocked = false;
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById('pg-completed').classList.remove('show');
   document.getElementById('pg-login').style.display = 'flex';
   document.getElementById('li-email').value = '';
-  document.getElementById('li-pass').value = '';
+  document.getElementById('li-pass').value  = '';
+  hideErr();
 }
 
 function showErr(m){ const e = document.getElementById('lerr'); e.classList.add('show'); document.getElementById('lerr-msg').textContent = m; }
@@ -241,8 +385,8 @@ function renderAssessmentsList() {
     return;
   }
   el.innerHTML = assessments.map(a => {
-    const teams = a.teams || [];
-    const qcount = (a.questions || []).length;
+    const teams    = a.teams || [];
+    const qcount   = (a.questions || []).length;
     const published = a.published;
     return `
     <div class="acard" onclick="openEditModal('${a.id}')">
@@ -250,17 +394,17 @@ function renderAssessmentsList() {
       <div class="acard-body">
         <div class="acard-title">${a.title}</div>
         <div class="acard-meta">
-          <span class="chip ch-blue">${qcount} Question${qcount !== 1 ? 's' : ''}</span>
+          <span class="chip ch-blue">${qcount} Question${qcount!==1?'s':''}</span>
           <span class="chip ch-gold">Pass: ${a.passingScore}%</span>
-          <span class="chip ${published ? 'ch-green' : 'ch-gray'}">${published ? '✓ Published' : 'Draft'}</span>
+          <span class="chip ${published?'ch-green':'ch-gray'}">${published?'✓ Published':'Draft'}</span>
         </div>
         <div class="acard-teams">
           ${teams.length ? '🏢 '+teams.join(' · ') : '<span style="color:var(--g500)">No teams assigned yet</span>'}
         </div>
       </div>
       <div class="acard-actions" onclick="event.stopPropagation()">
-        <button class="btn b-blue b-sm" onclick="togglePublish('${a.id}')">${published ? 'Unpublish' : 'Publish'}</button>
-        <button class="btn b-red b-sm" onclick="deleteAssessment('${a.id}')">Delete</button>
+        <button class="btn b-blue b-sm" onclick="togglePublish('${a.id}')">${published?'Unpublish':'Publish'}</button>
+        <button class="btn b-red b-sm"  onclick="deleteAssessment('${a.id}')">Delete</button>
       </div>
     </div>`;
   }).join('');
@@ -281,8 +425,8 @@ function getAIcon(title) {
 // ════════════════════════════════
 function openNewAssessmentModal() {
   document.getElementById('na-title').value = '';
-  document.getElementById('na-desc').value = '';
-  document.getElementById('na-pass').value = localStorage.getItem('gmm_def_pass') || 70;
+  document.getElementById('na-desc').value  = '';
+  document.getElementById('na-pass').value  = localStorage.getItem('gmm_def_pass') || 70;
   document.getElementById('na-email').value = localStorage.getItem('gmm_def_email') || '';
   renderTeamCheckboxes('team-checkboxes', []);
   openModal('modal-new-assessment');
@@ -293,8 +437,8 @@ function renderTeamCheckboxes(containerId, selected) {
   assessments.forEach(a => (a.teams||[]).forEach(t => allTeams.add(t)));
   const el = document.getElementById(containerId);
   el.innerHTML = [...allTeams].map(t => `
-    <label class="team-cb ${selected.includes(t) ? 'on' : ''}">
-      <input type="checkbox" value="${t}" ${selected.includes(t) ? 'checked' : ''} onchange="this.closest('.team-cb').classList.toggle('on',this.checked)"/>
+    <label class="team-cb ${selected.includes(t)?'on':''}">
+      <input type="checkbox" value="${t}" ${selected.includes(t)?'checked':''} onchange="this.closest('.team-cb').classList.toggle('on',this.checked)"/>
       ${t}
     </label>`).join('');
 }
@@ -306,7 +450,7 @@ function getCheckedTeams(containerId) {
 function addCustomTeam() {
   const inp = document.getElementById('new-team-inp');
   const v = inp.value.trim(); if(!v) return;
-  const el = document.getElementById('team-checkboxes');
+  const el  = document.getElementById('team-checkboxes');
   const div = document.createElement('label'); div.className = 'team-cb on';
   div.innerHTML = `<input type="checkbox" value="${v}" checked onchange="this.closest('.team-cb').classList.toggle('on',this.checked)"/>${v}`;
   el.appendChild(div); inp.value = '';
@@ -315,7 +459,7 @@ function addCustomTeam() {
 function addEditCustomTeam() {
   const inp = document.getElementById('edit-new-team-inp');
   const v = inp.value.trim(); if(!v) return;
-  const el = document.getElementById('edit-team-checkboxes');
+  const el  = document.getElementById('edit-team-checkboxes');
   const div = document.createElement('label'); div.className = 'team-cb on';
   div.innerHTML = `<input type="checkbox" value="${v}" checked onchange="this.closest('.team-cb').classList.toggle('on',this.checked)"/>${v}`;
   el.appendChild(div); inp.value = '';
@@ -325,22 +469,17 @@ function createAssessment() {
   const title = document.getElementById('na-title').value.trim();
   if(!title){ toast('Enter an assessment title','err'); return; }
   const a = {
-    id: 'a_'+Date.now(),
-    title,
-    desc: document.getElementById('na-desc').value.trim(),
+    id: 'a_'+Date.now(), title,
+    desc:         document.getElementById('na-desc').value.trim(),
     passingScore: parseInt(document.getElementById('na-pass').value) || 70,
-    mgmtEmail: document.getElementById('na-email').value.trim(),
-    teams: getCheckedTeams('team-checkboxes'),
-    questions: [],
-    published: false,
-    createdAt: new Date().toISOString()
+    mgmtEmail:    document.getElementById('na-email').value.trim(),
+    teams:        getCheckedTeams('team-checkboxes'),
+    questions: [], published: false, createdAt: new Date().toISOString()
   };
   assessments.push(a);
   saveAssessments();
   closeModal('modal-new-assessment');
-  renderAssessmentsList();
-  populateBuilderSelect();
-  populateResultsFilter();
+  renderAssessmentsList(); populateBuilderSelect(); populateResultsFilter();
   toast(`✓ "${title}" created`,'ok');
 }
 
@@ -349,31 +488,29 @@ function createAssessment() {
 // ════════════════════════════════
 function openEditModal(aid) {
   const a = assessments.find(x => x.id === aid); if(!a) return;
-  document.getElementById('edit-aid').value = aid;
+  document.getElementById('edit-aid').value           = aid;
   document.getElementById('edit-modal-title').textContent = 'Edit: '+a.title;
-  document.getElementById('edit-title').value = a.title;
-  document.getElementById('edit-desc').value = a.desc || '';
-  document.getElementById('edit-pass').value = a.passingScore || 70;
-  document.getElementById('edit-email').value = a.mgmtEmail || '';
+  document.getElementById('edit-title').value         = a.title;
+  document.getElementById('edit-desc').value          = a.desc || '';
+  document.getElementById('edit-pass').value          = a.passingScore || 70;
+  document.getElementById('edit-email').value         = a.mgmtEmail || '';
   renderTeamCheckboxes('edit-team-checkboxes', a.teams || []);
   openModal('modal-edit-assessment');
 }
 
 function saveEditAssessment() {
   const aid = document.getElementById('edit-aid').value;
-  const a = assessments.find(x => x.id === aid); if(!a) return;
+  const a   = assessments.find(x => x.id === aid); if(!a) return;
   const title = document.getElementById('edit-title').value.trim();
   if(!title){ toast('Title required','err'); return; }
-  a.title = title;
-  a.desc = document.getElementById('edit-desc').value.trim();
+  a.title        = title;
+  a.desc         = document.getElementById('edit-desc').value.trim();
   a.passingScore = parseInt(document.getElementById('edit-pass').value) || 70;
-  a.mgmtEmail = document.getElementById('edit-email').value.trim();
-  a.teams = getCheckedTeams('edit-team-checkboxes');
+  a.mgmtEmail    = document.getElementById('edit-email').value.trim();
+  a.teams        = getCheckedTeams('edit-team-checkboxes');
   saveAssessments();
   closeModal('modal-edit-assessment');
-  renderAssessmentsList();
-  populateBuilderSelect();
-  populateResultsFilter();
+  renderAssessmentsList(); populateBuilderSelect(); populateResultsFilter();
   toast('✓ Assessment updated','ok');
 }
 
@@ -382,17 +519,13 @@ function togglePublish(aid) {
   if(!a.published && !a.questions.length){ toast('Add questions before publishing','err'); return; }
   if(!a.published && !a.teams.length){ toast('Assign at least one team before publishing','err'); return; }
   a.published = !a.published;
-  saveAssessments();
-  renderAssessmentsList();
+  saveAssessments(); renderAssessmentsList();
   toast(a.published ? `✓ "${a.title}" is now live` : `"${a.title}" unpublished`,'ok');
 }
 
 function deleteAssessment(aid) {
   assessments = assessments.filter(a => a.id !== aid);
-  saveAssessments();
-  renderAssessmentsList();
-  populateBuilderSelect();
-  populateResultsFilter();
+  saveAssessments(); renderAssessmentsList(); populateBuilderSelect(); populateResultsFilter();
   if(currentAID === aid){ currentAID = null; renderQList(); }
   toast('Assessment deleted','ok');
 }
@@ -412,7 +545,7 @@ function populateBuilderSelect() {
 
 function switchBuilderAssessment() {
   currentAID = document.getElementById('builder-assessment-sel').value || null;
-  const a = currentAID ? assessments.find(x => x.id === currentAID) : null;
+  const a    = currentAID ? assessments.find(x => x.id === currentAID) : null;
   document.getElementById('builder-for-label').textContent = a ? `Building: ${a.title}` : 'Select an assessment first';
   renderQList();
 }
@@ -433,23 +566,21 @@ function setQT(t, btn) {
 }
 
 function markC(btn) {
-  const isMulti = qType === 'multi';
-  if(!isMulti) { document.querySelectorAll('#choices-wrap .mc-btn').forEach(b => b.classList.remove('on')); }
+  if(qType !== 'multi') document.querySelectorAll('#choices-wrap .mc-btn').forEach(b => b.classList.remove('on'));
   btn.classList.toggle('on');
 }
 
 function addOpt() {
   const wrap = document.getElementById('choices-wrap');
-  const idx = wrap.children.length;
+  const idx  = wrap.children.length;
   const labs = 'ABCDEFGHIJ';
-  const row = document.createElement('div'); row.className = 'crow';
-  row.innerHTML = `<button class="mc-btn" onclick="markC(this)">✓</button><input class="cinp" placeholder="Option ${labs[idx] || idx+1}"/><button class="rmbtn" onclick="rmC(this)">×</button>`;
+  const row  = document.createElement('div'); row.className = 'crow';
+  row.innerHTML = `<button class="mc-btn" onclick="markC(this)">✓</button><input class="cinp" placeholder="Option ${labs[idx]||idx+1}"/><button class="rmbtn" onclick="rmC(this)">×</button>`;
   wrap.appendChild(row);
 }
 
 function rmC(btn) {
-  const row = btn.closest('.crow');
-  if(document.getElementById('choices-wrap').children.length > 2) row.remove();
+  if(document.getElementById('choices-wrap').children.length > 2) btn.closest('.crow').remove();
   else toast('Need at least 2 options','err');
 }
 
@@ -467,25 +598,20 @@ function pickYN(v) {
 
 function addQ() {
   if(!currentAID){ toast('Select an assessment first','err'); return; }
-  const a = assessments.find(x => x.id === currentAID);
+  const a    = assessments.find(x => x.id === currentAID);
   const text = document.getElementById('q-text').value.trim();
   if(!text){ toast('Enter question text','err'); return; }
 
   const q = {
-    id: Date.now(),
-    text,
-    type: qType,
-    mandatory: document.getElementById('f-mand').checked,
-    points: parseInt(document.getElementById('f-pts').value) || 1,
-    explanation: document.getElementById('f-exp').checked ? document.getElementById('exp-txt').value.trim() : '',
-    options: [],
-    correctAnswers: [],
-    correctAnswer: null
+    id: Date.now(), text, type: qType,
+    mandatory:    document.getElementById('f-mand').checked,
+    points:       parseInt(document.getElementById('f-pts').value) || 1,
+    explanation:  document.getElementById('f-exp').checked ? document.getElementById('exp-txt').value.trim() : '',
+    options: [], correctAnswers: [], correctAnswer: null
   };
 
   if(['mcq','multi'].includes(qType)) {
-    const rows = document.querySelectorAll('#choices-wrap .crow');
-    rows.forEach((row, i) => {
+    document.querySelectorAll('#choices-wrap .crow').forEach(row => {
       const val = row.querySelector('.cinp').value.trim();
       if(val) {
         q.options.push(val);
@@ -496,50 +622,39 @@ function addQ() {
     if(!q.correctAnswers.length){ toast('Mark at least one correct answer','err'); return; }
   } else if(qType === 'tf') {
     if(!tfSel){ toast('Select correct answer (True/False)','err'); return; }
-    q.options = ['True','False'];
-    q.correctAnswer = tfSel;
+    q.options = ['True','False']; q.correctAnswer = tfSel;
   } else if(qType === 'yn') {
     if(!ynSel){ toast('Select correct answer (Yes/No)','err'); return; }
-    q.options = ['Yes','No'];
-    q.correctAnswer = ynSel;
+    q.options = ['Yes','No']; q.correctAnswer = ynSel;
   } else {
-    const key = document.getElementById('text-key').value.trim();
-    q.correctAnswer = key;
+    q.correctAnswer = document.getElementById('text-key').value.trim();
   }
 
   a.questions.push(q);
-  saveAssessments();
-  renderQList();
-  clearB();
+  saveAssessments(); renderQList(); clearB();
   toast('✓ Question added','ok');
 }
 
 function clearB() {
   document.getElementById('q-text').value = '';
-  document.getElementById('f-pts').value = 1;
+  document.getElementById('f-pts').value  = 1;
   document.getElementById('f-mand').checked = false;
-  document.getElementById('f-exp').checked = false;
-  document.getElementById('exp-txt').value = '';
+  document.getElementById('f-exp').checked  = false;
+  document.getElementById('exp-txt').value  = '';
   document.getElementById('s-exp').classList.add('hidden');
   document.getElementById('text-key').value = '';
   tfSel = null; ynSel = null;
   document.querySelectorAll('#choices-wrap .mc-btn').forEach(b => b.classList.remove('on'));
-  document.getElementById('tf-t').classList.remove('sel');
-  document.getElementById('tf-f').classList.remove('sel');
-  document.getElementById('yn-y').classList.remove('sel');
-  document.getElementById('yn-n').classList.remove('sel');
+  ['tf-t','tf-f','yn-y','yn-n'].forEach(id => document.getElementById(id)?.classList.remove('sel'));
 }
 
 function renderQList() {
-  const el = document.getElementById('q-list');
+  const el  = document.getElementById('q-list');
   const lbl = document.getElementById('q-count-lbl');
-  const a = currentAID ? assessments.find(x => x.id === currentAID) : null;
-  const qs = a ? a.questions : [];
+  const a   = currentAID ? assessments.find(x => x.id === currentAID) : null;
+  const qs  = a ? a.questions : [];
   lbl.textContent = qs.length + ' question' + (qs.length !== 1 ? 's' : '');
-  if(!qs.length) {
-    el.innerHTML = '<div class="empty"><div class="ei">❓</div><p>No questions yet.</p></div>';
-    return;
-  }
+  if(!qs.length) { el.innerHTML = '<div class="empty"><div class="ei">❓</div><p>No questions yet.</p></div>'; return; }
   const typeLabels = { mcq:'MCQ', multi:'Multi-Select', tf:'True/False', yn:'Yes/No', text:'Short Answer' };
   el.innerHTML = qs.map((q, i) => `
     <div class="qi">
@@ -549,18 +664,17 @@ function renderQList() {
         <div class="qchips">
           <span class="chip ch-blue">${typeLabels[q.type]||q.type}</span>
           <span class="chip ch-gold">${q.points}pt${q.points>1?'s':''}</span>
-          ${q.explanation ? '<span class="chip ch-green">Explanation</span>' : ''}
+          ${q.explanation?'<span class="chip ch-green">Explanation</span>':''}
         </div>
       </div>
-      <button class="qdel" onclick="deleteQ('${a.id}',${i})" title="Delete question">×</button>
+      <button class="qdel" onclick="deleteQ('${a.id}',${i})" title="Delete">×</button>
     </div>`).join('');
 }
 
 function deleteQ(aid, idx) {
   const a = assessments.find(x => x.id === aid); if(!a) return;
   a.questions.splice(idx, 1);
-  saveAssessments();
-  renderQList();
+  saveAssessments(); renderQList();
   toast('Question removed','ok');
 }
 
@@ -597,9 +711,8 @@ async function loadResults() {
 
 function filterResults() {
   const aid = document.getElementById('res-filter-assessment').value;
-  const a = aid ? assessments.find(x => x.id === aid) : null;
-  const filtered = a ? allResults.filter(r => r.assessmentTitle === a.title) : allResults;
-  renderResultsTable(filtered);
+  const a   = aid ? assessments.find(x => x.id === aid) : null;
+  renderResultsTable(a ? allResults.filter(r => r.assessmentTitle === a.title) : allResults);
 }
 
 function renderResultsTable(data) {
@@ -608,25 +721,70 @@ function renderResultsTable(data) {
     el.innerHTML = '<div class="empty"><div class="ei">📊</div><p>No results yet.</p></div>';
     return;
   }
-  el.innerHTML = `<div class="rtw"><table class="rt">
-    <thead><tr>
-      <th>Employee</th><th>Dept</th><th>Assessment</th>
-      <th>Score</th><th>Result</th><th>Correct</th><th>Submitted</th>
-    </tr></thead>
-    <tbody>${data.map(r => `<tr>
-      <td><div style="font-weight:600">${r.employeeName||'—'}</div><div style="font-size:11px;color:var(--g500)">${r.employeeEmail||''}</div></td>
-      <td style="color:var(--g300)">${r.department||'—'}</td>
-      <td>${r.assessmentTitle||'—'}</td>
-      <td><strong style="color:var(--blue-lt);font-size:15px">${r.score||0}%</strong></td>
-      <td><span class="pb ${r.passed==='Pass'?'p':'f'}">${r.passed||'—'}</span></td>
-      <td>${r.correct||0} / ${(parseInt(r.correct)||0)+(parseInt(r.wrong)||0)+(parseInt(r.skipped)||0)}</td>
-      <td style="color:var(--g500);font-size:11px">${r.submittedAt||'—'}</td>
-    </tr>`).join('')}</tbody>
-  </table></div>`;
+  el.innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
+      <button class="btn b-gold b-sm" onclick="exportExcel()">⬇ Export to Excel</button>
+    </div>
+    <div class="rtw"><table class="rt" id="results-table">
+      <thead><tr>
+        <th>Employee</th><th>Dept</th><th>Assessment</th>
+        <th>Score</th><th>Result</th><th>Correct</th><th>Submitted</th>
+      </tr></thead>
+      <tbody>${data.map(r => `<tr>
+        <td><div style="font-weight:600">${r.employeeName||'—'}</div><div style="font-size:11px;color:var(--g500)">${r.employeeEmail||''}</div></td>
+        <td style="color:var(--g300)">${r.department||'—'}</td>
+        <td>${r.assessmentTitle||'—'}</td>
+        <td><strong style="color:var(--blue-lt);font-size:15px">${r.score||0}%</strong></td>
+        <td><span class="pb ${r.passed==='Pass'?'p':'f'}">${r.passed||'—'}</span></td>
+        <td>${r.correct||0} / ${(parseInt(r.correct)||0)+(parseInt(r.wrong)||0)+(parseInt(r.skipped)||0)}</td>
+        <td style="color:var(--g500);font-size:11px">${r.submittedAt||'—'}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
 }
 
 // ════════════════════════════════
-// PERSIST (localStorage)
+// EXPORT TO EXCEL  (pure JS, no library needed)
+// ════════════════════════════════
+function exportExcel() {
+  const data = allResults.length ? allResults : [];
+  if(!data.length){ toast('No results to export','err'); return; }
+
+  // Build CSV (Excel opens .csv natively with correct encoding)
+  const headers = [
+    'Employee Name','Employee Email','Employee ID','Department',
+    'Assessment Title','Score (%)','Earned Points','Total Points',
+    'Result','Correct','Wrong','Skipped','Submitted At','Manager Email'
+  ];
+
+  const escape = v => {
+    const s = (v === null || v === undefined) ? '' : String(v);
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? '"' + s.replace(/"/g, '""') + '"'
+      : s;
+  };
+
+  const rows = data.map(r => [
+    r.employeeName, r.employeeEmail, r.employeeId, r.department,
+    r.assessmentTitle, r.score, r.earnedPoints, r.totalPoints,
+    r.passed, r.correct, r.wrong, r.skipped, r.submittedAt, r.mgmtEmail
+  ].map(escape).join(','));
+
+  const csv  = [headers.map(escape).join(','), ...rows].join('\r\n');
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' }); // BOM for Excel UTF-8
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  const date = new Date().toISOString().slice(0,10);
+  a.href     = url;
+  a.download = `GMM_Results_${date}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('✓ Excel file downloaded!','ok');
+}
+
+// ════════════════════════════════
+// PERSIST
 // ════════════════════════════════
 function saveAssessments() {
   try { localStorage.setItem('gmm_assessments', JSON.stringify(assessments)); } catch(e){}
@@ -636,25 +794,26 @@ function saveAssessments() {
 // EMPLOYEE VIEW
 // ════════════════════════════════
 function loadEmployeeView() {
-  const area = document.getElementById('emp-quiz-area');
+  const area  = document.getElementById('emp-quiz-area');
   const dept  = (currentUser.department || '').trim();
   const email = currentUser.email;
 
   const assigned = assessments.filter(a =>
-    a.published &&
-    (a.teams||[]).some(t => t.toLowerCase() === dept.toLowerCase())
+    a.published && (a.teams||[]).some(t => t.toLowerCase() === dept.toLowerCase())
   );
 
   if(!assigned.length) {
-    area.innerHTML = `<div class="not-assigned"><div class="icon">🔒</div><h2>No Assessment Assigned</h2><p>You don't have any assessments assigned to your team (<strong>${dept}</strong>) at this time. Please check back later or contact your administrator.</p></div>`;
+    area.innerHTML = `<div class="not-assigned"><div class="icon">🔒</div><h2>No Assessment Assigned</h2>
+      <p>You don't have any assessments assigned to your team (<strong>${dept}</strong>) at this time.</p></div>`;
     return;
   }
 
-  const completedKey = aid => `gmm_done_${email}_${aid}`;
-  const todo = assigned.filter(a => !localStorage.getItem(completedKey(a.id)));
+  const todo = assigned.filter(a => !localStorage.getItem(`gmm_done_${email}_${a.id}`));
 
   if(!todo.length) {
-    area.innerHTML = `<div class="already-done"><div class="icon">✅</div><h2>Assessment Already Completed</h2><p>You have already completed all your assigned assessments. Each assessment can only be taken once. Please contact your administrator if you have any questions.</p><div style="margin-top:28px;"><button class="btn b-ghost" onclick="doLogout()">Exit</button></div></div>`;
+    area.innerHTML = `<div class="already-done"><div class="icon">✅</div><h2>Assessment Already Completed</h2>
+      <p>You have already completed all your assigned assessments. Each assessment can only be taken once.</p>
+      <div style="margin-top:28px;"><button class="btn b-ghost" onclick="doLogout()">Exit</button></div></div>`;
     return;
   }
 
@@ -663,26 +822,28 @@ function loadEmployeeView() {
 
 function startQuiz(a) {
   empAnswers = {}; lockedQs = {};
-  const area = document.getElementById('emp-quiz-area');
+
+  // ── Enable anti-cheat lock ──
+  enableAssessmentLock();
+
+  const area  = document.getElementById('emp-quiz-area');
   const total = a.questions.reduce((s, q) => s + q.points, 0);
-  const labs = 'ABCDEFGH';
+  const labs  = 'ABCDEFGH';
   const hints = {
-    mcq: 'Choose one answer',
-    multi: 'Select all that apply',
-    tf: 'True or False — cannot change once selected',
-    yn: 'Yes or No — cannot change once selected',
-    text: 'Type your answer'
+    mcq:'Choose one answer', multi:'Select all that apply',
+    tf:'True or False — cannot change once selected',
+    yn:'Yes or No — cannot change once selected', text:'Type your answer'
   };
 
   area.innerHTML = `
     <div class="qhd">
       <h1>${a.title}</h1>
-      <p style="color:var(--g300);font-size:13px;">${a.desc || 'Read each question carefully and answer.'}</p>
+      <p style="color:var(--g300);font-size:13px;">${a.desc||'Read each question carefully and answer.'}</p>
       <div class="qmeta">
         <div class="qmi">📋 ${a.questions.length} Questions</div>
         <div class="qmi">🏅 ${total} Points</div>
         <div class="qmi">✅ Pass: ${a.passingScore}%</div>
-        <div class="qmi" style="color:#ff8080;">🔒 One attempt only</div>
+        <div class="qmi" style="color:#ff8080;">🔒 One attempt — do not switch tabs</div>
       </div>
     </div>
     <div class="pbar"><div class="pfill" id="ep-prog" style="width:0%"></div></div>
@@ -700,8 +861,7 @@ function startQuiz(a) {
       </button>
     </div>`;
 
-  const qContainer = document.getElementById('eq-qs');
-  qContainer.innerHTML = a.questions.map((q, qi) => {
+  document.getElementById('eq-qs').innerHTML = a.questions.map((q, qi) => {
     let opts = '';
     if(['mcq','multi'].includes(q.type)) {
       opts = `<div class="opts">${q.options.map((o, oi) => `
@@ -709,7 +869,7 @@ function startQuiz(a) {
           <div class="odot">${labs[oi]||oi}</div>${o}
         </button>`).join('')}</div>`;
     } else if(q.type === 'tf' || q.type === 'yn') {
-      const o = q.type === 'tf' ? ['True','False'] : ['Yes','No'];
+      const o  = q.type === 'tf' ? ['True','False'] : ['Yes','No'];
       const ic = q.type === 'tf' ? ['T','F'] : ['Y','N'];
       opts = `<div class="tf-row">${o.map((v, oi) => `
         <button class="opt" id="op-${qi}-${oi}" onclick="pick(${qi},${oi},'single','${a.id}')">
@@ -733,28 +893,23 @@ function startQuiz(a) {
 function pick(qi, oi, type, aid) {
   if(lockedQs[qi]){ toast('Answer already locked — cannot change','err'); return; }
   if(!empAnswers[qi]) empAnswers[qi] = [];
-
   if(type === 'multi') {
     const x = empAnswers[qi].indexOf(oi);
-    if(x > -1) empAnswers[qi].splice(x, 1); else empAnswers[qi].push(oi);
+    if(x > -1) empAnswers[qi].splice(x,1); else empAnswers[qi].push(oi);
   } else {
     empAnswers[qi] = [oi];
-    lockedQs[qi] = true;
+    lockedQs[qi]   = true;
     const a = assessments.find(x => x.id === aid);
-    if(a) {
-      (a.questions[qi].options||[]).forEach((_, i) => {
-        const b = document.getElementById(`op-${qi}-${i}`);
-        if(b){ b.classList.add('locked'); b.title = 'Answer locked'; }
-      });
-    }
+    if(a)(a.questions[qi].options||[]).forEach((_,i) => {
+      const b = document.getElementById(`op-${qi}-${i}`);
+      if(b){ b.classList.add('locked'); b.title = 'Answer locked'; }
+    });
   }
-
   const a = assessments.find(x => x.id === aid);
-  if(a) (a.questions[qi].options||[]).forEach((_, i) => {
+  if(a)(a.questions[qi].options||[]).forEach((_,i) => {
     const b = document.getElementById(`op-${qi}-${i}`);
     if(b) b.classList.toggle('sel', empAnswers[qi].includes(i));
   });
-
   document.getElementById(`qc-${qi}`)?.classList.toggle('done', empAnswers[qi].length > 0);
   updateProg(aid);
 }
@@ -769,7 +924,7 @@ function updateProg(aid) {
   const a = assessments.find(x => x.id === aid); if(!a) return;
   const tot = a.questions.length;
   const ans = Object.keys(empAnswers).filter(k => empAnswers[k] && empAnswers[k].length > 0).length;
-  const p = tot ? (ans / tot) * 100 : 0;
+  const p   = tot ? (ans/tot)*100 : 0;
   const prog = document.getElementById('ep-prog'); if(prog) prog.style.width = p+'%';
   const fill = document.getElementById('ep-cfill'); if(fill) fill.style.width = p+'%';
   const lbl  = document.getElementById('ep-clbl');  if(lbl)  lbl.textContent = `${ans} / ${tot}`;
@@ -779,62 +934,57 @@ function updateProg(aid) {
 // SUBMIT ASSESSMENT
 // ════════════════════════════════
 async function submitEmp(aid) {
-  const a = assessments.find(x => x.id === aid); if(!a) return;
+  const a  = assessments.find(x => x.id === aid); if(!a) return;
   const qs = a.questions;
-  const mandMissing = qs.filter((q, i) => q.mandatory && (!empAnswers[i] || !empAnswers[i].length));
+  const mandMissing = qs.filter((q,i) => q.mandatory && (!empAnswers[i]||!empAnswers[i].length));
   if(mandMissing.length){ toast(`⚠ Answer all mandatory (*) questions — ${mandMissing.length} remaining`,'err'); return; }
 
   const subBtn = document.querySelector('.subbox .btn');
   if(subBtn){ subBtn.disabled = true; subBtn.innerHTML = '<span class="spin"></span> Submitting…'; }
 
-  let earned = 0, total = 0, correct = 0, wrong = 0, skipped = 0;
-  qs.forEach((q, qi) => {
+  let earned=0, total=0, correct=0, wrong=0, skipped=0;
+  qs.forEach((q,qi) => {
     total += q.points;
     const ans = empAnswers[qi] || [];
     const has = ans.length > 0;
     let ok = false;
     if(['mcq','multi'].includes(q.type)) {
       ok = has && [...ans].sort().join() === ([...q.correctAnswers]).sort().join();
-    } else if(q.type === 'tf' || q.type === 'yn') {
-      const opts = q.type === 'tf' ? ['True','False'] : ['Yes','No'];
+    } else if(q.type==='tf'||q.type==='yn') {
+      const opts = q.type==='tf' ? ['True','False'] : ['Yes','No'];
       ok = has && opts[ans[0]] === q.correctAnswer;
     } else {
       ok = has && (q.correctAnswer ? (ans[0]||'').toLowerCase().includes(q.correctAnswer.toLowerCase()) : has);
     }
-    if(!has) skipped++; else if(ok){ correct++; earned += q.points; } else wrong++;
+    if(!has) skipped++; else if(ok){ correct++; earned+=q.points; } else wrong++;
   });
 
-  const pct    = total ? Math.round((earned / total) * 100) : 0;
+  const pct    = total ? Math.round((earned/total)*100) : 0;
   const passed = pct >= a.passingScore;
 
   const payload = {
-    action: 'saveResult',
-    employeeName: currentUser.name,
+    action:'saveResult',
+    employeeName:  currentUser.name,
     employeeEmail: currentUser.email,
-    employeeId: currentUser.employeeId || '',
-    department: currentUser.department || '',
-    assessmentId: a.id,
+    employeeId:    currentUser.employeeId || '',
+    department:    currentUser.department || '',
+    assessmentId:  a.id,
     assessmentTitle: a.title,
-    score: pct,
-    earnedPoints: earned,
-    totalPoints: total,
+    score: pct, earnedPoints: earned, totalPoints: total,
     passed: passed ? 'Pass' : 'Fail',
     correct, wrong, skipped,
     submittedAt: new Date().toLocaleString(),
     mgmtEmail: a.mgmtEmail || ''
   };
 
-  // Send to Google Sheets via Apps Script
-  if(GAS_URL) {
-    try { await gasCallSafe(payload); }
-    catch(e) { console.warn('GAS save failed:', e.message); }
-  }
+  if(GAS_URL) { try { await gasCallSafe(payload); } catch(e){ console.warn('GAS save failed:', e.message); } }
 
-  // Mark completed locally so they can't retake
   localStorage.setItem(`gmm_done_${currentUser.email}_${a.id}`, JSON.stringify({
     pct, passed, submittedAt: new Date().toISOString()
   }));
 
+  // ── Disable anti-cheat lock on successful submit ──
+  disableAssessmentLock();
   showCompletedScreen(passed);
 }
 
@@ -851,10 +1001,10 @@ function showCompletedScreen(passed) {
 function openModal(id){ document.getElementById(id).classList.add('open'); }
 function closeModal(id){ document.getElementById(id).classList.remove('open'); }
 
-function toast(msg, type = 'ok') {
+function toast(msg, type='ok') {
   const el = document.getElementById('toast');
   document.getElementById('t-msg').textContent = msg;
-  document.getElementById('t-ico').textContent  = type === 'ok' ? '✓' : '⚠';
+  document.getElementById('t-ico').textContent  = type==='ok' ? '✓' : '⚠';
   el.className = `toast ${type} show`;
   clearTimeout(window._tt);
   window._tt = setTimeout(() => el.className = `toast ${type}`, 3500);
@@ -872,17 +1022,12 @@ function seedDemoAssessments() {
       passingScore:70, mgmtEmail:'manager@gmmbilling.com', teams:['Charges Team'],
       published:true, createdAt:new Date().toISOString(),
       questions:[
-        { id:1,text:'What does CPT stand for?',type:'mcq',mandatory:true,points:2,
-          explanation:'CPT = Current Procedural Terminology',
-          options:['Current Patient Treatment','Current Procedural Terminology','Certified Payment Terms','Clinical Processing Tools'],
-          correctAnswers:[1],correctAnswer:null },
-        { id:2,text:'Which form is used for professional/outpatient billing?',type:'mcq',mandatory:true,points:2,
-          explanation:'CMS-1500 is the standard professional claim form.',
-          options:['UB-04','CMS-1450','CMS-1500','ADA Form'],
-          correctAnswers:[2],correctAnswer:null },
-        { id:3,text:'A charge entry must be completed within 24 hours of the patient visit.',type:'tf',mandatory:false,points:1,
-          explanation:'Timely charge entry is critical to revenue cycle.',
-          options:['True','False'],correctAnswers:[],correctAnswer:'True' },
+        { id:1,text:'What does CPT stand for?',type:'mcq',mandatory:true,points:2,explanation:'CPT = Current Procedural Terminology',
+          options:['Current Patient Treatment','Current Procedural Terminology','Certified Payment Terms','Clinical Processing Tools'],correctAnswers:[1],correctAnswer:null },
+        { id:2,text:'Which form is used for professional/outpatient billing?',type:'mcq',mandatory:true,points:2,explanation:'CMS-1500 is the standard professional claim form.',
+          options:['UB-04','CMS-1450','CMS-1500','ADA Form'],correctAnswers:[2],correctAnswer:null },
+        { id:3,text:'A charge entry must be completed within 24 hours of the patient visit.',type:'tf',mandatory:false,points:1,explanation:'Timely charge entry is critical to revenue cycle.',
+          options:['True','False'],correctAnswers:[],correctAnswer:'True' }
       ]
     },
     {
@@ -891,13 +1036,10 @@ function seedDemoAssessments() {
       passingScore:75, mgmtEmail:'manager@gmmbilling.com', teams:['Payment Team'],
       published:true, createdAt:new Date().toISOString(),
       questions:[
-        { id:4,text:'What does EOB stand for?',type:'mcq',mandatory:true,points:2,
-          explanation:'EOB = Explanation of Benefits.',
-          options:['Estimate of Benefits','Explanation of Benefits','Evidence of Billing','Entry of Balance'],
-          correctAnswers:[1],correctAnswer:null },
-        { id:5,text:'Does Medicare Part B cover inpatient hospital stays?',type:'yn',mandatory:true,points:1,
-          explanation:'Part A covers inpatient; Part B covers outpatient.',
-          options:['Yes','No'],correctAnswers:[],correctAnswer:'No' },
+        { id:4,text:'What does EOB stand for?',type:'mcq',mandatory:true,points:2,explanation:'EOB = Explanation of Benefits.',
+          options:['Estimate of Benefits','Explanation of Benefits','Evidence of Billing','Entry of Balance'],correctAnswers:[1],correctAnswer:null },
+        { id:5,text:'Does Medicare Part B cover inpatient hospital stays?',type:'yn',mandatory:true,points:1,explanation:'Part A covers inpatient; Part B covers outpatient.',
+          options:['Yes','No'],correctAnswers:[],correctAnswer:'No' }
       ]
     },
     {
@@ -906,13 +1048,10 @@ function seedDemoAssessments() {
       passingScore:80, mgmtEmail:'manager@gmmbilling.com', teams:['Analyst Team'],
       published:true, createdAt:new Date().toISOString(),
       questions:[
-        { id:6,text:'What is the standard clean claim submission timeframe for Medicare?',type:'mcq',mandatory:true,points:2,
-          explanation:'Medicare requires claims within 12 months (1 calendar year).',
-          options:['90 days','6 months','12 months','24 months'],
-          correctAnswers:[2],correctAnswer:null },
-        { id:7,text:'A denial rate above 10% is generally considered acceptable in RCM.',type:'tf',mandatory:false,points:1,
-          explanation:'Best practice is to keep denial rates under 5%.',
-          options:['True','False'],correctAnswers:[],correctAnswer:'False' },
+        { id:6,text:'What is the standard clean claim submission timeframe for Medicare?',type:'mcq',mandatory:true,points:2,explanation:'Medicare requires claims within 12 months (1 calendar year).',
+          options:['90 days','6 months','12 months','24 months'],correctAnswers:[2],correctAnswer:null },
+        { id:7,text:'A denial rate above 10% is generally considered acceptable in RCM.',type:'tf',mandatory:false,points:1,explanation:'Best practice is to keep denial rates under 5%.',
+          options:['True','False'],correctAnswers:[],correctAnswer:'False' }
       ]
     }
   ];
