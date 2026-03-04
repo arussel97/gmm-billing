@@ -151,6 +151,7 @@
             style="flex:1;min-width:240px;background:rgba(6,13,26,.7);border:1.5px solid var(--border);border-radius:9px;padding:9px 12px;color:var(--white);font-family:'Outfit',sans-serif;font-size:13px;outline:none;"/>
           <button class="btn b-blue b-sm" onclick="saveGAS()">💾 Save URL</button>
           <button class="btn b-ghost b-sm" onclick="testGAS()" id="test-gas-btn">🔌 Test Connection</button>
+          <button class="btn b-ghost b-sm" onclick="debugLogin()" id="debug-btn" style="border-color:rgba(232,160,32,.4);color:var(--gold-lt);">🔍 Debug Login</button>
         </div>
         <p id="gas-status" style="font-size:11px;color:var(--g500);margin-top:8px;"></p>
       </div>
@@ -168,7 +169,7 @@
           <table class="cgt">
             <thead><tr><th>Col</th><th>Header</th><th>Example</th><th>Notes</th></tr></thead>
             <tbody>
-              <tr><td style="color:var(--blue-lt);font-family:'JetBrains Mono',monospace;">A</td><td style="font-weight:600;">email</td><td style="color:var(--g300);font-family:'JetBrains Mono',monospace;font-size:11px;">john@gmmbilling.com</td><td style="color:var(--g500);font-size:11px;">Login email</td></tr>
+              <tr><td style="color:var(--blue-lt);font-family:'JetBrains Mono',monospace;">A</td><td style="font-weight:600;">email</td><td style="color:var(--g300);font-family:'JetBrains Mono',monospace;font-size:11px;"><a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="acc6c3c4c2eccbc1c1cec5c0c0c5c2cb82cfc3c1">[email&#160;protected]</a></td><td style="color:var(--g500);font-size:11px;">Login email</td></tr>
               <tr><td style="color:var(--blue-lt);font-family:'JetBrains Mono',monospace;">B</td><td style="font-weight:600;">password</td><td style="color:var(--g300);font-family:'JetBrains Mono',monospace;font-size:11px;">Pass@123</td><td style="color:var(--g500);font-size:11px;">Login password</td></tr>
               <tr><td style="color:var(--blue-lt);font-family:'JetBrains Mono',monospace;">C</td><td style="font-weight:600;">name</td><td style="color:var(--g300);font-family:'JetBrains Mono',monospace;font-size:11px;">John Doe</td><td style="color:var(--g500);font-size:11px;">Full name</td></tr>
               <tr><td style="color:var(--blue-lt);font-family:'JetBrains Mono',monospace;">D</td><td style="font-weight:600;">role</td><td style="color:var(--g300);font-family:'JetBrains Mono',monospace;font-size:11px;">employee</td><td style="color:var(--g500);font-size:11px;">employee or admin</td></tr>
@@ -280,9 +281,4 @@
 </div>
 
 <!-- Toast -->
-<div class="toast" id="toast"><span id="t-ico">✓</span><span id="t-msg">Done</span></div>
-
-<!-- Scripts -->
-<script src="js/app.js"></script>
-</body>
-</html>
+<div class="toast" id="toast"><span id
