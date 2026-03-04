@@ -50,24 +50,42 @@ let allResults   = [];
 
 // ════════════════════════════════
 // GOOGLE APPS SCRIPT API BRIDGE
+// Uses JSONP — bypasses CORS completely
 // ════════════════════════════════
-async function gasCall(data) {
-  if(!GAS_URL) throw new Error('No Apps Script URL configured');
-  const resp = await fetch(GAS_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify(data),
-    redirect: 'follow'
+function gasCall(data) {
+  return new Promise((resolve, reject) => {
+    if(!GAS_URL) { reject(new Error('No Apps Script URL configured')); return; }
+
+    const cbName = '_gmm_cb_' + Date.now() + '_' + Math.floor(Math.random()*9999);
+    const url = GAS_URL
+      + '?callback=' + encodeURIComponent(cbName)
+      + '&payload='  + encodeURIComponent(JSON.stringify(data))
+      + '&action='   + encodeURIComponent(data.action || '');
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('Request timed out after 10s'));
+    }, 10000);
+
+    function cleanup() {
+      clearTimeout(timer);
+      delete window[cbName];
+      const s = document.getElementById(cbName);
+      if(s) s.remove();
+    }
+
+    window[cbName] = (result) => { cleanup(); resolve(result); };
+
+    const script = document.createElement('script');
+    script.id  = cbName;
+    script.src = url;
+    script.onerror = () => { cleanup(); reject(new Error('Script load failed — check your Apps Script URL')); };
+    document.head.appendChild(script);
   });
-  const text = await resp.text();
-  const clean = text.replace(/^[\w]+\(/, '').replace(/\);\s*$/, '').trim();
-  return JSON.parse(clean);
 }
 
-// Timeout wrapper — falls back to demo login if GAS unreachable
-async function gasCallSafe(data, timeoutMs = 7000) {
-  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs));
-  return Promise.race([gasCall(data), timeout]);
+async function gasCallSafe(data) {
+  return gasCall(data);
 }
 
 // ════════════════════════════════
