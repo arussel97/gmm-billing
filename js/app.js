@@ -20,7 +20,7 @@ let quizLocked  = false;   // true while employee is taking an assessment
 // ════════════════════════════════
 // INIT — restore session on refresh
 // ════════════════════════════════
-(function init(){
+document.addEventListener('DOMContentLoaded', function init(){
   try { assessments = JSON.parse(localStorage.getItem('gmm_assessments') || '[]'); } catch(e){ assessments = []; }
 
   // ── RESTORE SESSION after page refresh ──────────────────
@@ -56,7 +56,7 @@ let quizLocked  = false;   // true while employee is taking an assessment
   });
 
   seedDemoAssessments();
-})();
+});
 
 // ════════════════════════════════
 // ANTI-CHEAT — Tab/Window/Focus Lock
@@ -103,9 +103,17 @@ function handleVisibilityChange() {
 }
 
 function handleWindowBlur() {
+  // Only trigger if quiz is locked AND the page itself is still visible
+  // (prevents false triggers from DevTools, address bar, OS notifications)
   if(!quizLocked) return;
-  warnCount++;
-  showAntiCheatWarning('⚠ You clicked outside the assessment window!');
+  if(document.hidden) return; // already handled by visibilitychange
+  // Small delay so legitimate browser chrome focus (scrollbar etc.) doesn't trigger
+  setTimeout(function() {
+    if(!quizLocked) return;
+    if(document.hasFocus()) return; // focus came back — ignore
+    warnCount++;
+    showAntiCheatWarning('⚠ You clicked outside the assessment window!');
+  }, 300);
 }
 
 function blockEvent(e) {
