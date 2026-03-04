@@ -240,6 +240,53 @@ function saveGAS() {
   toast('✓ Apps Script URL saved!','ok');
 }
 
+
+// ════════════════════════════════
+// DEBUG LOGIN — run from Settings tab
+// Tells you exactly what the sheet sees
+// ════════════════════════════════
+async function debugLogin() {
+  const btn = document.getElementById('debug-btn');
+  btn.textContent = 'Checking…'; btn.disabled = true;
+
+  // Grab whatever is typed in the login fields, or prompt
+  let email = document.getElementById('li-email')?.value.trim() ||
+              prompt('Enter the email to debug:','admin@gmmbilling.com');
+  let pass  = document.getElementById('li-pass')?.value.trim() ||
+              prompt('Enter the password to debug:','');
+
+  if(!email){ toast('Enter an email first','err'); btn.textContent='🔍 Debug Login'; btn.disabled=false; return; }
+
+  try {
+    const r = await gasCall({ action: 'debug', email, password: pass || '' });
+    console.log('DEBUG RESULT:', r);
+
+    let msg = '';
+    if(!r.success && r.message) {
+      msg = '❌ ' + r.message;
+    } else {
+      msg = '📋 Sheet: "' + r.sheetName + '" | Rows: ' + r.totalRows + '\n\n';
+      msg += '🔍 Match result:\n' + r.matchResult + '\n\n';
+      msg += '👁 Header row: ' + JSON.stringify(r.headerRow) + '\n\n';
+      if(r.dataPreview && r.dataPreview.length) {
+        msg += '📊 First data rows:\n';
+        r.dataPreview.forEach(function(row) {
+          msg += '  Row ' + row.row + ': email=[' + row.email_raw + '] type=' + row.email_type +
+                 ' pass_len=' + row.pass_len + ' first3=' + row.pass_first3 +
+                 ' role=[' + row.role + '] dept=[' + row.dept + '] active=[' + row.active + ']\n';
+        });
+      }
+    }
+
+    alert(msg);
+    document.getElementById('gas-status').textContent = r.matchResult ? r.matchResult.substring(0, 80) : 'See alert';
+  } catch(e) {
+    alert('Debug call failed: ' + e.message + '\n\nMake sure you redeployed the Apps Script after updating it.');
+  }
+
+  btn.textContent = '🔍 Debug Login'; btn.disabled = false;
+}
+
 async function testGAS() {
   const v = document.getElementById('gas-inp').value.trim() || GAS_URL;
   if(!v){ toast('No URL configured','err'); return; }
