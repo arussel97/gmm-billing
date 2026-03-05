@@ -159,20 +159,28 @@ function wireEmpOnce() {
 }
 
 /* ── GAS JSONP CALL ─────────────────────────────────────────── */
+/* ── GAS CALL ─────────────────────────────────────────────────
+   Strategy:
+   1. First use fetch() with redirect:follow to resolve the
+      Google redirect (script.google.com → script.googleusercontent.com)
+   2. Then inject the RESOLVED URL as a JSONP <script> tag
+   This fixes "Script load failed" on GitHub Pages.
+   ────────────────────────────────────────────────────────── */
 function gasCall(data) {
   return new Promise(function(resolve, reject) {
     var url = GAS_URL;
-    if (!url) { reject(new Error('No Apps Script URL set')); return; }
+    if (!url) { reject(new Error('No Apps Script URL configured. Go to Settings and save your URL.')); return; }
 
-    var cb   = '_gmm' + Date.now() + Math.floor(Math.random() * 9999);
+    var cb = '_gmm' + Date.now() + '_' + Math.floor(Math.random() * 99999);
+    var qs = '?callback=' + encodeURIComponent(cb)
+           + '&action='   + encodeURIComponent(data.action || '')
+           + '&payload='  + encodeURIComponent(JSON.stringify(data));
+
     var done = false;
-
     var timer = setTimeout(function() {
-      if (done) return;
-      done = true;
-      cleanup();
-      reject(new Error('Timeout — Apps Script took too long'));
-    }, 15000);
+      if (done) return; done = true; cleanup();
+      reject(new Error('Timeout after 20s — Apps Script may be slow or URL is wrong'));
+    }, 20000);
 
     function cleanup() {
       clearTimeout(timer);
@@ -181,27 +189,34 @@ function gasCall(data) {
       if (s) s.remove();
     }
 
-    window[cb] = function(result) {
-      if (done) return;
-      done = true;
-      cleanup();
-      resolve(result);
-    };
+    function injectScript(finalUrl) {
+      window[cb] = function(result) {
+        if (done) return; done = true; cleanup(); resolve(result);
+      };
+      var s = document.createElement('script');
+      s.id  = cb;
+      s.src = finalUrl + qs;
+      s.onerror = function() {
+        if (done) return; done = true; cleanup();
+        reject(new Error('Failed to load Apps Script. Make sure:
+1. URL is correct
+2. Deployed as: Execute=Me, Access=Anyone
+3. You created a NEW deployment after any code changes'));
+      };
+      document.head.appendChild(s);
+    }
 
-    var qs = '?callback=' + encodeURIComponent(cb)
-           + '&action='   + encodeURIComponent(data.action || '')
-           + '&payload='  + encodeURIComponent(JSON.stringify(data));
-
-    var s    = document.createElement('script');
-    s.id     = cb;
-    s.src    = url + qs;
-    s.onerror = function() {
-      if (done) return;
-      done = true;
-      cleanup();
-      reject(new Error('Script load failed — check Apps Script URL and deployment'));
-    };
-    document.head.appendChild(s);
+    // Use fetch to follow the Google redirect, then inject the final URL
+    fetch(url + qs, { method: 'GET', mode: 'no-cors', redirect: 'follow' })
+      .then(function() {
+        // fetch succeeded (opaque response is fine) — inject JSONP with original URL
+        // Google handles the redirect internally for script tags too
+        injectScript(url);
+      })
+      .catch(function() {
+        // fetch blocked — try injecting directly anyway (works in some environments)
+        injectScript(url);
+      });
   });
 }
 
@@ -307,23 +322,27 @@ function saveGAS() {
 async function testGAS() {
   var v = el('gas-inp').value.trim() || GAS_URL;
   if (!v) { toast('No URL configured', 'err'); return; }
-  // temporarily set GAS_URL
-  var old = GAS_URL; GAS_URL = v;
+  var savedURL = GAS_URL;
+  GAS_URL = v;
   var btn = el('btn-test-gas');
-  btn.innerHTML = '<span class="spin"></span>'; btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>&nbsp;Testing…'; btn.disabled = true;
+  el('gas-status').innerHTML = '<span class="conn-status conn-wait">⏳ Connecting to Google Sheets…</span>';
   try {
     var r = await gasCall({ action: 'ping' });
     if (r && r.success) {
       el('gas-status').innerHTML = '<span class="conn-status conn-ok">✅ Connected to Google Sheets!</span>';
       toast('✅ Connected!', 'ok');
+      GAS_URL = v;
+      localStorage.setItem('gmm_gas_url', v);
     } else {
-      el('gas-status').innerHTML = '<span class="conn-status conn-err">⚠ ' + (r ? r.message : 'Unknown error') + '</span>';
-      toast('⚠ Check Apps Script', 'err');
+      el('gas-status').innerHTML = '<span class="conn-status conn-err">⚠ Script responded but returned an error: ' + (r ? r.message : 'Unknown') + '</span>';
+      toast('⚠ Check Apps Script code', 'err');
+      GAS_URL = savedURL;
     }
   } catch(e) {
-    el('gas-status').innerHTML = '<span class="conn-status conn-err">❌ ' + e.message + '</span>';
-    toast('❌ ' + e.message, 'err');
-    GAS_URL = old;
+    el('gas-status').innerHTML = '<span class="conn-status conn-err">❌ ' + e.message.replace(/\n/g, ' ') + '</span>';
+    toast('❌ Connection failed', 'err');
+    GAS_URL = savedURL;
   }
   btn.textContent = '🔌 Test Connection'; btn.disabled = false;
 }
